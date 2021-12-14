@@ -1,5 +1,5 @@
 #![warn(clippy::all)]
-#![allow(unused)]
+// #![allow(unused)]
 
 use std::fs;
 use std::str::FromStr;
@@ -13,13 +13,8 @@ use bytes::Bytes;
 use color_eyre::eyre::Result;
 use qp2p::{Config, Endpoint, IncomingConnections};
 use structopt::StructOpt;
-use tokio::time::Sleep;
-use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
-    spawn,
-    time::sleep,
-};
+
+use tokio::spawn;
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "Send or receive files. Receiving is default unless the send flag is used.")]
@@ -62,7 +57,7 @@ async fn main() -> Result<()> {
 }
 
 async fn send(port: u16, peer_address: SocketAddr, file: Vec<u8>) -> Result<()> {
-    let (node, mut incoming_connections) = make_node(port).await?;
+    let (node, _incoming_connections) = make_node(port).await?;
 
     let msg = Bytes::from(file);
     // println!("Sending to {:?} --> {:?}\n", peer_address, msg);
@@ -77,7 +72,7 @@ async fn send(port: u16, peer_address: SocketAddr, file: Vec<u8>) -> Result<()> 
 async fn receive(port: u16) -> Result<()> {
     println!("Waiting for connection...");
 
-    let (node, mut incoming_connections) = make_node(port).await?;
+    let (_node, mut incoming_connections) = make_node(port).await?;
 
     while let Some((connection, mut incoming_messages)) = incoming_connections.next().await {
         let src = connection.remote_address();
@@ -96,7 +91,7 @@ async fn receive(port: u16) -> Result<()> {
 }
 
 async fn make_node(port: u16) -> Result<(Endpoint, IncomingConnections)> {
-    let (node, mut incoming_connections, _) = Endpoint::new(
+    let (node, incoming_connections, _) = Endpoint::new(
         SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), port)),
         &[],
         Config {
