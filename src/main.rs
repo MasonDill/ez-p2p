@@ -1,47 +1,108 @@
 #![warn(clippy::all)]
-// #![allow(unused)]
+#![allow(unused)]
 
-use std::{thread::sleep, time::Duration};
+use std::fs;
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use anyhow::Result;
+use bytes::Bytes;
+use color_eyre::eyre::Result;
+use qp2p::{Config, Endpoint, IncomingConnections};
+use structopt::StructOpt;
+use tokio::time::Sleep;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
     spawn,
+    time::sleep,
 };
 
-const ADDR: &str = "127.0.0.1:8080";
+
+#[derive(Debug, StructOpt)]
+#[structopt(about = "Send or receive files. Receiving is default unless the send flag is used.")]
+struct Opt {
+    /// Specifies which file to send. (Default is receiving if this flag is unused.)
+    #[structopt(short, long, name = "FILE", parse(from_os_str))]
+    send: Option<PathBuf>,
+
+    /// Network port
+    #[structopt(short, long)]
+    port: u16,
+
+    /// Network port
+    #[structopt(short = "o", long)]
+    peer_port: Option<u16>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let rx = spawn(receive(ADDR));
-    let tx = spawn(send(ADDR));
+    color_eyre::install()?;
+    let opt = Opt::from_args();
 
-    tx.await??;
-    rx.await??;
-
-    Ok(())
-}
-
-async fn send(addr: &str) -> Result<()> {
-    let mut stream = TcpStream::connect(addr).await?;
-
-    stream.write_all(b"hello world!").await?;
-
-    Ok(())
-}
-
-async fn receive(addr: &str) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-
-    if let Ok((rx_stream, addr)) = listener.accept().await {
-        println!(
-            "Listener accepted!\nStream: {:#?}\nAddress: {:#?}",
-            rx_stream, addr
-        );
+    if let Some(file) = opt.send {
+        if Path::exists(&file) {
+            let tx = spawn(send(opt.port, opt.peer_port.unwrap(), fs::read(file)?));
+            tx.await??;
+        } else {
+            panic!("File does not exist.")
+        }
+    } else {
+        let rx = spawn(receive(opt.port));
+        rx.await??;
     }
 
-    sleep(Duration::from_secs(3));
+    Ok(())
+}
+
+async fn send(port: u16, peer_port: u16, file: Vec<u8>) -> Result<()> {
+    let (node, mut incoming_connections) = make_node(port).await?;
+
+    let peer: SocketAddr = SocketAddr::from((Ipv4Addr::LOCALHOST, peer_port));
+    let msg = Bytes::from(file);
+    // println!("Sending to {:?} --> {:?}\n", peer, msg);
+    println!("Sending to {:?}", peer);
+    let (connection, _connection_incoming) = node.connect_to(&peer).await?;
+    connection.send(msg).await?;
+    connection.close();
 
     Ok(())
+}
+
+async fn receive(port: u16) -> Result<()> {
+    println!("Waiting for connection...");
+
+    let (node, mut incoming_connections) = make_node(port).await?;
+
+    while let Some((connection, mut incoming_messages)) = incoming_connections.next().await {
+        let src = connection.remote_address();
+        println!("Connection made to {:?}", src);
+
+        // loop over incoming messages
+        while let Some(bytes) = incoming_messages.next().await? {
+            // println!("Message received from {:?} --> {:?}", src, bytes);
+            println!("File received; writing to output.bin.");
+            fs::write("output.bin", bytes);
+            println!("Done!");
+        }
+    }
+
+    Ok(())
+}
+
+async fn make_node(port: u16) -> Result<(Endpoint, IncomingConnections)> {
+    let (node, mut incoming_connections, _) = Endpoint::new(
+        SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), port)),
+        &[],
+        Config {
+            forward_port: false, // TODO: change to true when testing NAT hole punching
+            idle_timeout: Some(Duration::from_secs(120)),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    Ok((node, incoming_connections))
 }

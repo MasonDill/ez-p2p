@@ -6,6 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.51"
+bytes = "1.1.0"
+color-eyre = "0.5.11"
+
 qp2p = "0.27.2"
+structopt = "0.3.25"
 tokio = { version = "1.14.0", features = ["full"] }
+
+[features]
