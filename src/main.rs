@@ -87,7 +87,6 @@ async fn receive() -> Result<()> {
         }
 
     }
-    println!("Internal ip {}", internal_ip);
     
     let port = port_scanner::request_open_port().expect("Unable to find an available port.");
     let external_ip = public_ip::addr().await;
