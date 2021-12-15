@@ -4,7 +4,7 @@
 mod igd;
 
 use std::{
-    net::SocketAddr,
+    net::{SocketAddr, IpAddr},
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -77,7 +77,18 @@ async fn send(peer_addr: SocketAddr, file: File) -> Result<()> {
 }
 
 async fn receive() -> Result<()> {
-    let internal_ip = local_ip().expect("Couldn't get internal IP.");
+    let mut internal_ip: IpAddr = local_ip().expect("Couldn't get internal IP.");
+
+    #[cfg(target_os = "windows")]{
+        for adapter in ipconfig::get_adapters()? {
+            if adapter.friendly_name() == "Wi-Fi"{ //this is most likely the network adapter we are looking for
+               internal_ip = *adapter.ip_addresses().get(1).unwrap();
+            }
+        }
+
+    }
+    println!("Internal ip {}", internal_ip);
+    
     let port = port_scanner::request_open_port().expect("Unable to find an available port.");
     let external_ip = public_ip::addr().await;
 
@@ -97,13 +108,13 @@ async fn receive() -> Result<()> {
     )
     .await
     .map_err(|_| IgdError::TimedOut)??;
-
-    println!("Endpoint created at {:?}", printed_addr);
+    println!("Endpoint created at {:?}\nListening...", printed_addr);
 
     let listener = TcpListener::bind(local_addr).await?;
     let (mut stream, _sender) = listener.accept().await?;
     let out_file = File::create("out.bin").await?;
     copy(&mut stream, &mut BufWriter::new(out_file)).await?;
+    println!("\nTransfer complete!");
     Ok(())
 }
 
