@@ -13,7 +13,7 @@ use std::{
 use color_eyre::eyre::Result;
 use local_ip_address::local_ip;
 
-use crate::igd::{forward_port, IgdError};
+use crate::igd::{forward_port, remove_port, IgdError};
 use structopt::StructOpt;
 use tokio::{
     fs,
@@ -114,6 +114,14 @@ async fn receive() -> Result<()> {
     let out_file = File::create("out.bin").await?;
     copy(&mut stream, &mut BufWriter::new(out_file)).await?;
     println!("\nTransfer complete!");
+
+    timeout(
+        Duration::from_secs(30),
+        remove_port(port, local_addr),
+    )
+    .await
+    .map_err(|_| IgdError::TimedOut)??;
+
     Ok(())
 }
 

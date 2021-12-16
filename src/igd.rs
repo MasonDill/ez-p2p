@@ -139,3 +139,35 @@ pub(crate) async fn renew_port(
         Err(IgdError::NotSupported)
     }
 }
+pub(crate) async fn remove_port(
+    ext_port: u16,
+    local_addr: SocketAddr,
+) -> Result<(), IgdError> {
+    let gateway = igd::aio::search_gateway(SearchOptions::default()).await?;
+    dbg!(&gateway);
+    debug!("IGD gateway found: {:?}", gateway);
+
+    println!("Removing port mapping for {} -> {}", ext_port, local_addr);
+
+    let local_addr = match local_addr {
+        SocketAddr::V4(local_addr) => local_addr,
+        _ => {
+            info!("IPv6 for IGD is not supported");
+            return Err(IgdError::NotSupported);
+        }
+    };
+
+    gateway
+        .remove_port(
+            igd::PortMappingProtocol::TCP,
+            ext_port,
+        )
+        .await.expect("Port could not be removed!");
+
+    println!(
+        "Successfully removed port mapping for {} -> {}",
+        ext_port, local_addr
+    );
+
+    Ok(())
+}
