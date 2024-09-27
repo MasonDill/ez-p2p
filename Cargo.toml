@@ -9,4 +9,7 @@ rust-version = "1.61.0"
 [dependencies]
 tokio = { version = "1.40.0", features = ["full"] }
 clap = { version = "4.5.18", features = ["derive"] }
+serde_json = { version = "1.0.128" }
+
+
 [features]
