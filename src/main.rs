@@ -1,156 +1,96 @@
-#![warn(clippy::all)]
-// #![allow(unused)]
+use clap::error;
+use clap::{builder::PossibleValue, Parser};
+use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpListener, net::TcpSocket, net::TcpStream};
+use std::net::SocketAddr;
+use std::io;
 
-mod igd;
+#[derive(Parser)]
+struct Args {   
+    #[arg(index(1), required(true), value_parser([
+        PossibleValue::new("server").alias("tx"),
+        PossibleValue::new("client").alias("rx")]))]
+    role: String,
 
-use std::{
-    net::{SocketAddr, IpAddr},
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
+    #[arg(short, long)]
+    file: Option<String>,
 
-use color_eyre::eyre::Result;
-use local_ip_address::local_ip;
+    #[arg(short('p'), long, required_if_eq("role", "server"))]
+    port: Option<u16>,
 
-use crate::igd::{forward_port, remove_port, IgdError};
-use structopt::StructOpt;
-use tokio::{
-    fs,
-    fs::File,
-    io::{copy, AsyncWriteExt, BufReader, BufWriter},
-    net::{TcpListener, TcpStream},
-    spawn,
-    time::timeout,
-};
-
-#[derive(Debug, StructOpt)]
-#[structopt(about = "Send or receive files. Receiving is default unless the send flag is used.")]
-struct Opt {
-    /// Specifies which file to send. (Default is receiving if this flag is
-    /// unused.)
-    #[structopt(short, long, name = "FILE", parse(from_os_str))]
-    send: Option<PathBuf>,
-
-    /// Peer's network address (ip:port)
-    #[structopt(short = "o", long="ip", parse(try_from_str = parse_socket_addr))]
-    peer_address: Option<SocketAddr>,
+    #[arg(short('a'), long, required_if_eq("role", "client"))]
+    peer_address: Option<String>,
 }
 
-fn parse_socket_addr(src: &str) -> Result<SocketAddr, std::net::AddrParseError> {
-    SocketAddr::from_str(src)
-}
+const WORKER_THREADS: usize = 1;
+fn main() {
+    let args = Args::parse();
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // tracing_subscriber::fmt()
-    //     .with_max_level(Level::TRACE)
-    //     .init();
-    // color_eyre::install()?;
-    let opt = Opt::from_args();
-
-    if let Some(file) = opt.send {
-        // sending
-        if Path::exists(&file) && fs::metadata(&file).await?.is_file() {
-            let tx = spawn(send(opt.peer_address.unwrap(), File::open(file).await?));
-            tx.await??;
-        } else {
-            panic!("File does not exist.");
+    match args.role.as_str() {
+        "server" => {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKER_THREADS)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(receive(&args))
+                .unwrap();
         }
-    } else {
-        // receiving
-        let rx = spawn(receive());
-        rx.await??;
+        "client" => {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKER_THREADS)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(trasmit(&args))
+                .unwrap();
+        }
+        _ => {
+            panic!("Invalid role");
+        }
     }
+}
+
+async fn read_file(file : &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut file = tokio::fs::File::open(file).await?;
+    let mut contents = vec![];
+    file.read_to_end(&mut contents).await?;
+    Ok(contents)
+}
+
+async fn write_file(file : &str, contents : Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = tokio::fs::File::create(file).await?;
+    file.write_all(&contents).await?;
+    Ok(())
+}
+
+async fn trasmit(args : &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let peer_address: &Option<String> = &args.peer_address;
+    let mut stream = TcpStream::connect(args.peer_address.as_ref().unwrap()).await?;
+    
+    // Load the data from the file
+    let mut contents = read_file(args.file.as_ref().unwrap()).await?;
+    stream.write_all(&contents).await?;
 
     Ok(())
 }
 
-async fn send(peer_addr: SocketAddr, file: File) -> Result<()> {
-    println!("Sending to {:?}", peer_addr);
-    let mut stream = TcpStream::connect(peer_addr).await?;
-    copy(&mut BufReader::new(file), &mut stream).await?;
-    stream.shutdown().await?;
-    println!("Done!");
+async fn receive(args : &Args) -> io::Result<()> {
+    let socket_address = format!("127.0.0.1:{}", args.port.unwrap());
+    let listener = TcpListener::bind(&socket_address).await?;
+    println!("Listening on: {}", listener.local_addr()?);
 
-    Ok(())
-}
-
-async fn receive() -> Result<()> {
-    let mut internal_ip: IpAddr = local_ip().expect("Couldn't get internal IP.");
-
-    #[cfg(target_os = "windows")]{
-        for adapter in ipconfig::get_adapters()? {
-            if adapter.friendly_name() == "Wi-Fi"{ //this is most likely the network adapter we are looking for
-               internal_ip = *adapter.ip_addresses().get(1).unwrap();
-            }
-        }
-
+    //let file: &str = args.file.as_ref().unwrap();
+    loop{
+        let (mut socket, _) = listener.accept().await?;
+        println!("Accepted connection from {}", socket.peer_addr()?);
+        tokio::spawn(async move {
+            let mut buf = [0; 1024];
+            let n = socket.read(&mut buf).await.unwrap();
+            
+            // write the data to the file
+            //write_file(&file, buf.to_vec());
+            print!("{}", std::str::from_utf8(&buf[..n]).unwrap());
+        });
     }
     
-    let port = port_scanner::request_open_port().expect("Unable to find an available port.");
-    let external_ip = public_ip::addr().await;
-
-    let local_addr = SocketAddr::new(internal_ip, port);
-
-    let printed_addr = {
-        if let Some(external_ip) = external_ip {
-            SocketAddr::new(external_ip, port)
-        } else {
-            local_addr
-        }
-    };
-
-    timeout(
-        Duration::from_secs(30),
-        forward_port(port, local_addr, Duration::from_secs(60 * 60)),
-    )
-    .await
-    .map_err(|_| IgdError::TimedOut)??;
-    println!("Endpoint created at {:?}\nListening...", printed_addr);
-
-    let listener = TcpListener::bind(local_addr).await?;
-    let (mut stream, _sender) = listener.accept().await?;
-    let out_file = File::create("out.bin").await?;
-    copy(&mut stream, &mut BufWriter::new(out_file)).await?;
-    println!("\nTransfer complete!");
-
-    timeout(
-        Duration::from_secs(30),
-        remove_port(port, local_addr),
-    )
-    .await
-    .map_err(|_| IgdError::TimedOut)??;
-
-    Ok(())
 }
-
-/*async fn make_node() -> Result<(Endpoint, IncomingConnections)> {
-    let internal_ip = local_ip().expect("Couldn't get internal IP.");
-    let port = port_scanner::request_open_port().expect("Unable to find an available port.");
-    let external_ip = public_ip::addr().await;
-
-    let local_addr = SocketAddr::new(internal_ip, port);
-
-    let printed_addr = {
-        if let Some(external_ip) = external_ip {
-            SocketAddr::new(external_ip, port)
-        } else {
-            local_addr
-        }
-    };
-    println!("Endpoint created at {:?}", printed_addr);
-
-    let (node, incoming_connections, _) = Endpoint::new(
-        local_addr,
-        &[],
-        Config {
-            forward_port: true,
-            idle_timeout: Some(Duration::from_secs(120)),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    Ok((node, incoming_connections))
-}*/
