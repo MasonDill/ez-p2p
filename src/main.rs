@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
+
 use clap::{builder::PossibleValue, Parser};
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpListener, net::TcpStream};
+use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpListener, net::TcpStream, net::TcpSocket};
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -118,20 +120,11 @@ async fn receive(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn fetch_private_ip() -> Result<String, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("ipconfig")
-        .output()
-        .expect("Failed to execute ipconfig");
-    let output = String::from_utf8(output.stdout).unwrap();
-    let ip = output
-        .lines()
-        .find(|line| line.contains("IPv4 Address"))
-        .unwrap()
-        .split(':')
-        .last()
-        .unwrap()
-        .trim();
-
-    return Ok(ip.to_string());
+    // Connect to a public address to establish a TCP connection
+    let stream = TcpStream::connect("8.8.8.8:443").await?;
+    let ip = stream.local_addr()?;
+    
+    Ok(ip.ip().to_string())
 }
 
 async fn fetch_public_ip() -> Result<String, Box<dyn std::error::Error>> {
