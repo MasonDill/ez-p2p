@@ -136,23 +136,49 @@ const LOCAL_HOST: &str = "0.0.0.0";
 /// # Returns
 /// * `Result<()>` - Success or error status
 async fn add_port_mapping(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let gateway = igd::search_gateway(SearchOptions {
-        timeout: Some(Duration::from_secs(5)),
+    // First try to discover gateway with a shorter timeout
+    let gateway = match igd::search_gateway(SearchOptions {
+        timeout: Some(Duration::from_secs(1)),
         ..Default::default()
-    })?;
+    }) {
+        Ok(gateway) => gateway,
+        Err(e) => {
+            eprintln!("UPnP gateway discovery failed: {}", e);
+            eprintln!("Please ensure:");
+            eprintln!("1. You are connected to a router");
+            eprintln!("2. UPnP is enabled on your router");
+            eprintln!("3. Your router supports UPnP");
+            return Err(Box::new(e));
+        }
+    };
 
-    let private_ip: Ipv4Addr = fetch_private_ip().await?.parse()?;
+    let private_ip: Ipv4Addr = match fetch_private_ip().await?.parse() {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("Failed to parse private IP: {}", e);
+            return Err(Box::new(e));
+        }
+    };
+    
     let local_addr = SocketAddrV4::new(private_ip, port);
 
-    gateway.add_port(
+    match gateway.add_port(
         igd::PortMappingProtocol::TCP,
         port,
         local_addr,
         60 * 30, // 30 minutes lease
         "rust-file-transfer",
-    )?;
-
-    Ok(())
+    ) {
+        Ok(_) => {
+            println!("Successfully set up UPnP port forwarding");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to add UPnP port mapping: {}", e);
+            eprintln!("You may need to manually configure port forwarding on your router");
+            Err(Box::new(e))
+        }
+    }
 }
 
 /// Removes a UPnP port mapping
@@ -196,8 +222,9 @@ async fn receive(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let public_ip = match args.visibility.as_str() {
         "public" => {
             // Set up UPnP port forwarding for public visibility
-            if let Err(e) = add_port_mapping(port).await {
-                eprintln!("Warning: Failed to set up UPnP port forwarding: {}", e);
+            match add_port_mapping(port).await {
+                Ok(_) => println!("UPnP port forwarding configured successfully"),
+                Err(e) => eprintln!("UPnP setup failed - you may need to configure port forwarding manually: {}", e)
             }
             fetch_public_ip().await?
         }
@@ -207,6 +234,9 @@ async fn receive(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     
     let public_socket_address = format!("{}:{}", public_ip, port);
     println!("Listening on socket {}", &public_socket_address);
+    if args.visibility == "public" {
+        println!("To connect, run: ez-p2p client <file> -s {}", public_socket_address);
+    }
 
     let (socket, _) = listener.accept().await?;
     println!("Accepted connection from {}", socket.peer_addr()?);
